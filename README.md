@@ -31,7 +31,7 @@
 
 ## 功能概览
 
-- 📥 多账号批量导入/登录：压缩包导入；手机号验证码登录；2FA 密码
+- 📥 多账号批量导入/登录：支持 Telethon/TData 压缩包导入；手机号验证码登录；2FA 密码
 - 👥 批量运营能力：批量加群/订阅/退群、批量邀请成员/机器人、批量设置管理员、导出链接等
 - 📱 一键踢出其他设备：保留面板当前会话，清理其它在线设备
 - 🧹 废号检测与一键清理：封禁/受限/冻结/未登录/Session 失效等状态批量处理
@@ -110,6 +110,16 @@ docker compose up -d
 docker compose restart
 docker compose down
 ```
+
+### 本地开发运行（可选）
+
+> 适合需要改代码或本地调试的场景（需先安装 .NET 8 SDK）。
+
+```bash
+dotnet run --project src/TelegramPanel.Web
+```
+
+访问：`http://localhost:5000`
 
 ## Docker 一键更新（面板内）
 
