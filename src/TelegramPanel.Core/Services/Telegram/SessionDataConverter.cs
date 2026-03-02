@@ -404,7 +404,9 @@ public static class SessionDataConverter
     private static string Base64UrlEncode(byte[] bytes)
     {
         var base64 = Convert.ToBase64String(bytes);
-        return base64.TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        // 注意：@mtcute/convert 在 Telethon->tdata 转换时，要求保留 base64 padding（尾部 '='）。
+        // 若去掉 padding，可能会把 auth key 解析成 248 字节，导致导出的 tdata 无法被官方客户端使用。
+        return base64.Replace('+', '-').Replace('/', '_');
     }
 
     private readonly record struct TelethonSessionData(int DcId, string IpAddress, ushort Port, byte[] AuthKey);

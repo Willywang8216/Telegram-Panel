@@ -156,6 +156,7 @@ try {
 
         try
         {
+            var normalizedSession = NormalizeTelethonSessionString(telethonSessionString);
             var absoluteOutputDir = Path.GetFullPath(outputTdataDirectory);
             if (Directory.Exists(absoluteOutputDir))
                 Directory.Delete(absoluteOutputDir, recursive: true);
@@ -163,7 +164,7 @@ try {
 
             var run = await RunProcessAsync(
                 fileName: "node",
-                arguments: new[] { "--input-type=module", "-e", NodeScriptTelethonToTdata, "--", telethonSessionString.Trim(), absoluteOutputDir },
+                arguments: new[] { "--input-type=module", "-e", NodeScriptTelethonToTdata, "--", normalizedSession, absoluteOutputDir },
                 workingDirectory: RuntimeDir,
                 timeoutMs: ConvertTimeoutMs,
                 cancellationToken: cancellationToken);
@@ -201,6 +202,23 @@ try {
             logger.LogWarning(ex, "Telethon->tdata conversion failed");
             return ConvertToTdataResult.Fail(ex.Message);
         }
+    }
+
+    private static string NormalizeTelethonSessionString(string sessionString)
+    {
+        var trimmed = sessionString.Trim();
+        if (trimmed.Length < 2 || !char.IsDigit(trimmed[0]))
+            return trimmed;
+
+        var body = trimmed[1..];
+        var mod = body.Length % 4;
+        if (mod == 0)
+            return trimmed;
+        if (mod == 1)
+            return trimmed; // 非法长度，保持原样让下游报错更明确
+
+        var padding = mod == 2 ? "==" : "=";
+        return $"{trimmed}{padding}";
     }
 
     private static async Task<(bool Ok, string? Error)> EnsureRuntimeReadyAsync(ILogger logger, CancellationToken cancellationToken)
