@@ -1,6 +1,6 @@
 # 安装部署
 
-本文档用于把 Telegram Panel 跑起来（推荐 Docker）。
+本文档用于把 Telegram Panel 跑起来（推荐 Docker 远程镜像）。
 
 ## Docker 部署（推荐）
 
@@ -8,12 +8,33 @@
 
 - Docker（Windows 推荐 Docker Desktop + WSL2；Linux 直接安装 Docker Engine）
 
-### 启动
+### 第一步：准备项目
 
 ```bash
 git clone https://github.com/moeacgx/Telegram-Panel
 cd Telegram-Panel
-docker compose up -d --build
+cp .env.example .env
+```
+
+### 第二步：选择镜像版本
+
+默认是稳定版（无需改动）：
+
+```bash
+TP_IMAGE=ghcr.io/moeacgx/telegram-panel:latest
+```
+
+如果你要开发版，把 `.env` 里的 `TP_IMAGE` 改成：
+
+```bash
+TP_IMAGE=ghcr.io/moeacgx/telegram-panel:dev-latest
+```
+
+### 第三步：启动
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
 启动后访问：`http://localhost:5000`
@@ -43,6 +64,21 @@ docker compose up -d --build
 
 更多说明见：[配置与数据目录](../reference/configuration.md)。
 
+### 常用命令
+
+```bash
+# 查看日志
+docker compose logs -f
+
+# 更新到当前 .env 指定的镜像版本
+docker compose pull
+docker compose up -d
+
+# 重启 / 停止
+docker compose restart
+docker compose down
+```
+
 ## 生产部署入口
 
 - 反向代理（含 WebSocket）：见 [反向代理](../deployment/reverse-proxy.md)
@@ -55,7 +91,7 @@ docker compose up -d --build
 
 ## 下一步
 
-- 账号导入：见 [账号导入（压缩包）](../guides/account-import.md)
+- 账号导入：见 [账号导入（Zip / TData）](../guides/account-import.md)
 - 新号必看：见 [防冻结指南](../guides/anti-freeze.md)
 - 列表/批量能力依赖同步：见 [同步说明](../guides/sync.md)
 
