@@ -405,6 +405,7 @@ public class BotTelegramService
             var customTitle = el.TryGetProperty("custom_title", out var ctEl) ? ctEl.GetString() : null;
             var canInviteUsers = ReadBool(el, "can_invite_users");
             var canPromoteMembers = ReadBool(el, "can_promote_members");
+            var canRestrictMembers = ReadBool(el, "can_restrict_members");
 
             if (!el.TryGetProperty("user", out var userEl) || userEl.ValueKind != JsonValueKind.Object)
                 continue;
@@ -424,7 +425,8 @@ public class BotTelegramService
                 Status: status,
                 CustomTitle: string.IsNullOrWhiteSpace(customTitle) ? null : customTitle.Trim(),
                 CanInviteUsers: canInviteUsers,
-                CanPromoteMembers: canPromoteMembers
+                CanPromoteMembers: canPromoteMembers,
+                CanRestrictMembers: canRestrictMembers
             ));
         }
 
@@ -801,7 +803,8 @@ public class BotTelegramService
         string Status,
         string? CustomTitle,
         bool CanInviteUsers,
-        bool CanPromoteMembers)
+        bool CanPromoteMembers,
+        bool CanRestrictMembers)
     {
         public bool IsCreator => string.Equals(Status, "creator", StringComparison.OrdinalIgnoreCase);
         public string DisplayName
