@@ -85,9 +85,11 @@
 @code {
     [Parameter] public ModuleTaskDraft Draft { get; set; }
     [Parameter] public EventCallback<ModuleTaskDraft> DraftChanged { get; set; }
+    [Parameter] public string? InitialConfigJson { get; set; }
 
     private List<AccountCategory> categories = new();
     private bool loading = true;
+    private bool initializedFromConfig;
 
     private int selectedCategoryId;
     private string targetsText = "";
@@ -102,6 +104,8 @@
 
     protected override async Task OnInitializedAsync()
     {
+        ApplyInitialConfigIfNeeded();
+
         try
         {
             categories = (await CategoryManagement.GetAllCategoriesAsync())
@@ -116,6 +120,41 @@
         {
             loading = false;
             await PushDraftAsync();
+        }
+    }
+
+    private void ApplyInitialConfigIfNeeded()
+    {
+        if (initializedFromConfig)
+            return;
+
+        initializedFromConfig = true;
+
+        var raw = (InitialConfigJson ?? string.Empty).Trim();
+        if (raw.Length == 0)
+            return;
+
+        try
+        {
+            var cfg = JsonSerializer.Deserialize<UserChatActiveTaskConfig>(raw);
+            if (cfg == null)
+                return;
+
+            if (cfg.CategoryId > 0)
+                selectedCategoryId = cfg.CategoryId;
+
+            targetsText = string.Join(Environment.NewLine, cfg.Targets ?? new List<string>());
+            dictionaryText = string.Join(Environment.NewLine, cfg.Dictionary ?? new List<string>());
+            delayMinMs = cfg.DelayMinMs;
+            delayMaxMs = cfg.DelayMaxMs;
+            maxMessages = cfg.MaxMessages;
+            accountMode = NormalizeMode(cfg.AccountMode);
+            targetMode = NormalizeMode(cfg.TargetMode);
+            messageMode = NormalizeMode(cfg.MessageMode);
+        }
+        catch
+        {
+            // 忽略旧配置解析失败，回退到默认值。
         }
     }
 
@@ -207,6 +246,13 @@
     {
         return string.Equals(value, UserChatActiveTaskModes.Random, StringComparison.OrdinalIgnoreCase)
                || string.Equals(value, UserChatActiveTaskModes.Queue, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeMode(string? value)
+    {
+        return string.Equals(value, UserChatActiveTaskModes.Queue, StringComparison.OrdinalIgnoreCase)
+            ? UserChatActiveTaskModes.Queue
+            : UserChatActiveTaskModes.Random;
     }
 
     private static List<string> ParseTargetLines(string? text)

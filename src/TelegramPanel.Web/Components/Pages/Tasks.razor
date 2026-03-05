@@ -90,6 +90,11 @@
                 <MudTd DataLabel="操作">
                     <MudIconButton Icon="@Icons.Material.Filled.Info" Size="Size.Small" Color="Color.Info"
                                    OnClick="@(() => ShowTaskDetails(context))" />
+                    @if (CanEditUserChatActiveTask(context))
+                    {
+                        <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small" Color="Color.Primary"
+                                       OnClick="@(() => OpenEditUserChatActiveTask(context))" />
+                    }
                     @if (IsActiveStatus(GetDisplayStatus(context)))
                     {
                         <MudIconButton Icon="@Icons.Material.Filled.Cancel" Size="Size.Small" Color="Color.Warning"
@@ -149,6 +154,16 @@
                 <MudTd DataLabel="操作">
                     <MudIconButton Icon="@Icons.Material.Filled.Info" Size="Size.Small" Color="Color.Info"
                                    OnClick="@(() => ShowTaskDetails(context))" />
+                    @if (CanEditUserChatActiveTask(context))
+                    {
+                        <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small" Color="Color.Primary"
+                                       OnClick="@(() => OpenEditUserChatActiveTask(context))" />
+                    }
+                    @if (CanRerunUserChatActiveTask(context))
+                    {
+                        <MudIconButton Icon="@Icons.Material.Filled.Replay" Size="Size.Small" Color="Color.Secondary"
+                                       OnClick="@(() => RerunUserChatActiveTask(context))" />
+                    }
                     <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
                                    OnClick="@(() => DeleteTask(context.Id))" />
                 </MudTd>
@@ -398,6 +413,18 @@
     private static bool IsUserChatActiveTask(string taskType) =>
         taskType is BatchTaskTypes.UserChatActive;
 
+    private static bool CanEditUserChatActiveTask(BatchTask task)
+    {
+        return IsUserChatActiveTask(task.TaskType)
+               && !string.Equals(task.Status, "running", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool CanRerunUserChatActiveTask(BatchTask task)
+    {
+        return IsUserChatActiveTask(task.TaskType)
+               && !string.Equals(task.Status, "running", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static List<string> ExtractBotAdminFailureLines(BatchTask task)
     {
         var lines = new List<string>();
@@ -631,5 +658,126 @@
         var result = await dialog.Result;
         if (result is { Canceled: false })
             await LoadTasks();
+    }
+
+    private async Task OpenEditUserChatActiveTask(BatchTask task)
+    {
+        if (!CanEditUserChatActiveTask(task))
+        {
+            Snackbar.Add("该任务当前不可编辑", Severity.Warning);
+            return;
+        }
+
+        var parameters = new DialogParameters
+        {
+            ["TaskId"] = task.Id
+        };
+        var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Large, FullWidth = true };
+        var dialog = DialogService.Show<TelegramPanel.Web.Components.Dialogs.EditUserChatActiveTaskDialog>($"编辑持续任务 #{task.Id}", parameters, options)!;
+        var result = await dialog.Result;
+        if (result is { Canceled: false })
+            await LoadTasks();
+    }
+
+    private async Task RerunUserChatActiveTask(BatchTask task)
+    {
+        if (!CanRerunUserChatActiveTask(task))
+        {
+            Snackbar.Add("该任务当前不可重新运行", Severity.Warning);
+            return;
+        }
+
+        bool? confirm = await DialogService.ShowMessageBox(
+            "确认重新运行",
+            $"将基于任务 #{task.Id} 的配置创建一个新任务，是否继续？",
+            yesText: "继续", cancelText: "取消");
+
+        if (confirm != true)
+            return;
+
+        try
+        {
+            var rerunConfig = BuildRerunConfig(task.Config);
+            var total = rerunConfig.MaxMessages > 0 ? rerunConfig.MaxMessages : 0;
+            var configJson = JsonSerializer.Serialize(rerunConfig, new JsonSerializerOptions { WriteIndented = true });
+
+            var created = await TaskManagement.CreateTaskAsync(new BatchTask
+            {
+                TaskType = BatchTaskTypes.UserChatActive,
+                Total = total,
+                Completed = 0,
+                Failed = 0,
+                Config = configJson
+            });
+
+            Snackbar.Add($"已创建重跑任务 #{created.Id}", Severity.Success);
+            await LoadTasks();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"重新运行失败：{ex.Message}", Severity.Error);
+        }
+    }
+
+    private static UserChatActiveTaskConfig BuildRerunConfig(string? rawConfig)
+    {
+        var raw = (rawConfig ?? string.Empty).Trim();
+        if (raw.Length == 0)
+            throw new InvalidOperationException("任务配置为空，无法重新运行");
+
+        UserChatActiveTaskConfig cfg;
+        try
+        {
+            cfg = JsonSerializer.Deserialize<UserChatActiveTaskConfig>(raw)
+                  ?? throw new InvalidOperationException("任务配置解析结果为空");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"任务配置 JSON 无效：{ex.Message}");
+        }
+
+        if (cfg.CategoryId <= 0)
+            throw new InvalidOperationException("任务缺少账号分类，无法重新运行");
+
+        cfg.Targets = (cfg.Targets ?? new List<string>())
+            .Select(x => (x ?? string.Empty).Trim())
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        cfg.Dictionary = (cfg.Dictionary ?? new List<string>())
+            .Select(x => (x ?? string.Empty).Trim())
+            .Where(x => x.Length > 0)
+            .ToList();
+
+        if (cfg.Targets.Count == 0)
+            throw new InvalidOperationException("任务缺少目标群组/频道，无法重新运行");
+
+        if (cfg.Dictionary.Count == 0)
+            throw new InvalidOperationException("任务缺少词典消息，无法重新运行");
+
+        if (cfg.DelayMinMs < 0) cfg.DelayMinMs = 0;
+        if (cfg.DelayMaxMs < 0) cfg.DelayMaxMs = 0;
+        if (cfg.DelayMinMs > 600000) cfg.DelayMinMs = 600000;
+        if (cfg.DelayMaxMs > 600000) cfg.DelayMaxMs = 600000;
+        if (cfg.DelayMaxMs < cfg.DelayMinMs) cfg.DelayMaxMs = cfg.DelayMinMs;
+        if (cfg.MaxMessages < 0) cfg.MaxMessages = 0;
+
+        cfg.AccountMode = NormalizeModeValue(cfg.AccountMode);
+        cfg.TargetMode = NormalizeModeValue(cfg.TargetMode);
+        cfg.MessageMode = NormalizeModeValue(cfg.MessageMode);
+
+        cfg.Canceled = false;
+        cfg.Error = null;
+        cfg.RecentFailures = new List<UserChatActiveTaskRuntimeFailure>();
+
+        return cfg;
+    }
+
+    private static string NormalizeModeValue(string? mode)
+    {
+        return string.Equals((mode ?? string.Empty).Trim(), UserChatActiveTaskModes.Queue, StringComparison.OrdinalIgnoreCase)
+            ? UserChatActiveTaskModes.Queue
+            : UserChatActiveTaskModes.Random;
     }
 }

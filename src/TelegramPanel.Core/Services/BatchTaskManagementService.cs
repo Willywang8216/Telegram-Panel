@@ -68,6 +68,18 @@ public class BatchTaskManagementService
         }
     }
 
+    public async Task UpdateTaskDraftAsync(int taskId, int total, string? config)
+    {
+        var task = await _batchTaskRepository.GetByIdAsync(taskId);
+        if (task != null)
+        {
+            if (total < 0) total = 0;
+            task.Total = total;
+            task.Config = config;
+            await _batchTaskRepository.UpdateAsync(task);
+        }
+    }
+
     public async Task StartTaskAsync(int taskId)
     {
         var task = await _batchTaskRepository.GetByIdAsync(taskId);
