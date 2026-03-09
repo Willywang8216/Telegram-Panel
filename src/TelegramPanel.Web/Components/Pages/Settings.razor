@@ -14,6 +14,7 @@
 @inject PanelTimeZoneService TimeZone
 @inject NavigationManager Navigation
 @inject CloudMailClient CloudMail
+@inject TelegramPanelAiService PanelAiService
 @using TelegramPanel.Web.Services
 @using TelegramPanel.Core.Utils
 
@@ -97,11 +98,27 @@
                 <MudTextField @bind-Value="aiPresetModelsText" Label="预设模型（每行一个）" Variant="Variant.Outlined" Class="mt-3"
                               Lines="4"
                               HelperText="例如：gpt-4o-mini、qwen-vl-plus；任务编辑器会直接复用这里的预设。" />
+                <MudText Typo="Typo.caption" Class="mt-2 mud-text-secondary">
+                    测试连通会直接使用当前表单里的端点、Key 和模型，不必先保存。
+                </MudText>
             </MudCardContent>
             <MudCardActions>
                 <MudButton Variant="Variant.Filled" Color="Color.Primary"
                            OnClick="@(async (MouseEventArgs _) => await SaveAiConfig())">
                     保存 AI 配置
+                </MudButton>
+                <MudButton Variant="Variant.Outlined" Color="Color.Info"
+                           Disabled="@aiTesting"
+                           OnClick="@(async (MouseEventArgs _) => await TestAiConnectionAsync())">
+                    @if (aiTesting)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        <span>测试中...</span>
+                    }
+                    else
+                    {
+                        <span>测试连通</span>
+                    }
                 </MudButton>
             </MudCardActions>
         </MudCard>
@@ -314,6 +331,7 @@
     private string aiApiKey = "";
     private string aiDefaultModel = "";
     private string aiPresetModelsText = "";
+    private bool aiTesting = false;
 
     private sealed record TimeZoneChoice(string Id, string Label);
 
@@ -502,6 +520,58 @@
         }
     }
 
+    private async Task TestAiConnectionAsync()
+    {
+        if (aiTesting)
+            return;
+
+        aiTesting = true;
+        try
+        {
+            var normalizedEndpoint = AiOpenAiSettingsSnapshot.NormalizeEndpoint(aiEndpoint);
+            var normalizedApiKey = AiOpenAiSettingsSnapshot.NormalizeApiKey(aiApiKey);
+            var normalizedDefaultModel = AiOpenAiSettingsSnapshot.NormalizeModel(aiDefaultModel);
+            var presetModels = AiOpenAiSettingsSnapshot.NormalizeModelEntries(ParseLines(aiPresetModelsText), normalizedDefaultModel);
+            var snapshot = new AiOpenAiSettingsSnapshot(normalizedEndpoint, normalizedApiKey, normalizedDefaultModel, presetModels);
+            var testModel = ResolveAiTestModel(snapshot);
+
+            if (!snapshot.TryValidateForTask(testModel, out var validateError))
+            {
+                Snackbar.Add($"AI 连通测试失败：{validateError}", Severity.Warning);
+                return;
+            }
+
+            var result = await PanelAiService.TestConnectionAsync(snapshot, testModel, CancellationToken.None);
+            if (!result.Success)
+            {
+                Snackbar.Add($"AI 连通测试失败：{result.Error}", Severity.Error);
+                return;
+            }
+
+            var modelName = result.Model ?? snapshot.ResolveModel(testModel) ?? "（未知模型）";
+            var preview = string.IsNullOrWhiteSpace(result.ResponseText) ? "（空响应）" : result.ResponseText;
+            Snackbar.Add($"AI 连通成功：模型 {modelName}，返回 {preview}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"AI 连通测试失败：{ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            aiTesting = false;
+            StateHasChanged();
+        }
+    }
+
+    private string? ResolveAiTestModel(AiOpenAiSettingsSnapshot snapshot)
+    {
+        var defaultModel = AiOpenAiSettingsSnapshot.NormalizeModel(aiDefaultModel);
+        if (!string.IsNullOrWhiteSpace(defaultModel))
+            return defaultModel;
+
+        return snapshot.PresetModels.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+    }
+
     private async Task GenerateCloudMailToken()
     {
         if (cloudMailGeneratingToken)
@@ -606,7 +676,7 @@
 
     private async Task SaveLocalConfigAsync(System.Text.Json.Nodes.JsonObject root)
     {
-        var json = root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        var json = LocalConfigFile.ToIndentedJson(root);
         var path = LocalConfigPath;
         await LocalConfigFile.EnsureExistsAsync(path);
         await LocalConfigFile.WriteJsonAtomicallyAsync(path, json);

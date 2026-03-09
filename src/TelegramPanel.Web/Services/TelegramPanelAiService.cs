@@ -173,6 +173,38 @@ public sealed class TelegramPanelAiService : ITelegramPanelAiService
         }
     }
 
+    public async Task<(bool Success, string? Model, string? ResponseText, string? Error)> TestConnectionAsync(
+        AiOpenAiSettingsSnapshot settings,
+        string? overrideModel = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!settings.TryValidateForTask(overrideModel, out var validateError))
+            return (false, null, null, validateError);
+
+        var model = settings.ResolveModel(overrideModel)!;
+
+        try
+        {
+            var content = await SendChatCompletionAsync(
+                settings,
+                model,
+                "你是 AI 连通性测试助手。请只回复 pong。",
+                "ping",
+                cancellationToken);
+
+            var normalized = StripMarkdownFence(content).Trim();
+            if (normalized.Length == 0)
+                return (false, model, null, "AI 返回了空响应");
+
+            return (true, model, TrimForPreview(normalized), null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AI connectivity test failed");
+            return (false, model, null, ex.Message);
+        }
+    }
+
     private async Task<string> SendChatCompletionAsync(
         AiOpenAiSettingsSnapshot settings,
         string model,
@@ -259,5 +291,11 @@ public sealed class TelegramPanelAiService : ITelegramPanelAiService
     {
         var normalized = (text ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
         return normalized.Length <= 400 ? normalized : normalized[..400];
+    }
+
+    private static string TrimForPreview(string text)
+    {
+        var normalized = (text ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+        return normalized.Length <= 80 ? normalized : normalized[..80];
     }
 }

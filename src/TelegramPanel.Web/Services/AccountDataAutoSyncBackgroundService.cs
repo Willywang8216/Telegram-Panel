@@ -193,7 +193,7 @@ public sealed class AccountDataAutoSyncBackgroundService : BackgroundService
             var sync = EnsureObject(root, "Sync");
             sync["LastAutoSyncAtUtc"] = utcNow.ToString("O", CultureInfo.InvariantCulture);
 
-            var updatedJson = root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            var updatedJson = LocalConfigFile.ToIndentedJson(root);
             await LocalConfigFile.WriteJsonAtomicallyAsync(path, updatedJson, cancellationToken);
         }
         catch (Exception ex)

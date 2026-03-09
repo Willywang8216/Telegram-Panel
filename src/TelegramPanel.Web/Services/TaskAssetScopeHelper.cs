@@ -38,7 +38,7 @@ public static class TaskAssetScopeHelper
                 return configJson;
 
             node.Remove(AssetScopeIdProperty);
-            return node.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            return LocalConfigFile.ToIndentedJson(node);
         }
         catch
         {
@@ -63,7 +63,7 @@ public static class TaskAssetScopeHelper
             else
                 node[AssetScopeIdProperty] = normalized;
 
-            return node.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            return LocalConfigFile.ToIndentedJson(node);
         }
         catch
         {
