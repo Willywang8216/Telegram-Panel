@@ -1403,29 +1403,7 @@ public class AccountTelegramToolsService
             var client = await GetOrCreateConnectedClientAsync(accountId, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
-            // 先把原图读入内存，然后做“居中裁剪为正方形 + 缩放到 512x512 + JPEG 压缩”，再上传给 Telegram。
-            // 这样可以避免：原图过大、长宽比异常、某些上传流读取不稳定等问题。
-            await using var raw = new MemoryStream();
-            if (fileStream.CanSeek)
-                fileStream.Position = 0;
-
-            await fileStream.CopyToAsync(raw, cancellationToken);
-            raw.Position = 0;
-
-            using var image = await Image.LoadAsync(raw, cancellationToken);
-            image.Mutate(x => x.AutoOrient());
-
-            const int targetSize = 512;
-            image.Mutate(x => x.Resize(new ResizeOptions
-            {
-                Mode = ResizeMode.Crop,
-                Size = new Size(targetSize, targetSize)
-            }));
-
-            await using var encoded = new MemoryStream();
-            await image.SaveAsJpegAsync(encoded, new JpegEncoder { Quality = 85 }, cancellationToken);
-            encoded.Position = 0;
-
+            await using var encoded = await TelegramImageProcessor.PrepareAvatarJpegAsync(fileStream, cancellationToken);
             var inputFile = await client.UploadFileAsync(encoded, "avatar.jpg");
             cancellationToken.ThrowIfCancellationRequested();
 
