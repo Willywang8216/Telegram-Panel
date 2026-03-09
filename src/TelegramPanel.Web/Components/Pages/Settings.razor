@@ -7,6 +7,7 @@
 @inject IGroupService GroupService
 @inject ITelegramClientPool TelegramClientPool
 @inject TelegramPanel.Web.Services.DataSyncService DataSync
+@inject BatchTaskManagementService TaskManagement
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject IWebHostEnvironment Environment
@@ -90,6 +91,8 @@
                                  Min="1000" Max="10000" HelperText="建议2000-5000ms" />
                 <MudNumericField @bind-Value="maxConcurrent" Label="最大并发任务数" Variant="Variant.Outlined" Class="mt-3"
                                  Min="1" Max="10" HelperText="同时执行的任务数量" />
+                <MudNumericField @bind-Value="historyRetentionLimit" Label="历史任务保留上限" Variant="Variant.Outlined" Class="mt-3"
+                                 Min="0" Max="5000" HelperText="仅保留最新的已完成/失败任务，0 表示不限制" />
                 <MudSwitch @bind-Value="autoRetry" Label="失败自动重试" Color="Color.Primary" Class="mt-3" />
                 @if (autoRetry)
                 {
@@ -265,6 +268,7 @@
     private string apiHash = "";
     private int defaultDelay = 2000;
     private int maxConcurrent = 1;
+    private int historyRetentionLimit = 0;
     private bool autoRetry = false;
     private int maxRetries = 3;
     private bool autoSync = true;
@@ -314,6 +318,7 @@
         apiHash = Configuration["Telegram:ApiHash"] ?? "";
         defaultDelay = Configuration.GetValue("Telegram:DefaultDelayMs", 2000);
         maxConcurrent = Configuration.GetValue("BatchTasks:MaxConcurrent", 1);
+        historyRetentionLimit = Configuration.GetValue("BatchTasks:HistoryRetentionLimit", 0);
         maxRetries = Configuration.GetValue("Telegram:MaxRetries", 0);
         autoRetry = maxRetries > 0;
         if (maxRetries <= 0) maxRetries = 3;
@@ -567,6 +572,12 @@
             return;
         }
 
+        if (historyRetentionLimit < 0 || historyRetentionLimit > 5000)
+        {
+            Snackbar.Add("历史任务保留上限范围应为 0-5000", Severity.Error);
+            return;
+        }
+
         try
         {
             var root = await LoadOrCreateLocalConfigAsync();
@@ -577,9 +588,19 @@
 
             var batchTasks = EnsureObject(root, "BatchTasks");
             batchTasks["MaxConcurrent"] = maxConcurrent;
+            batchTasks["HistoryRetentionLimit"] = historyRetentionLimit;
 
             await SaveLocalConfigAsync(root);
-            Snackbar.Add("批量操作配置已保存（配置热重载后生效）", Severity.Success);
+
+            var deletedCount = historyRetentionLimit > 0
+                ? await TaskManagement.TrimHistoryTasksAsync(historyRetentionLimit)
+                : 0;
+
+            var message = deletedCount > 0
+                ? $"批量操作配置已保存，并已清理 {deletedCount} 条超出上限的历史任务"
+                : "批量操作配置已保存（配置热重载后生效）";
+
+            Snackbar.Add(message, Severity.Success);
             StateHasChanged();
         }
         catch (Exception ex)
@@ -639,21 +660,16 @@
         }
 
         syncing = true;
-        Snackbar.Add("开始同步频道和群组信息...", Severity.Info);
+        Snackbar.Add("正在后台创建同步任务...", Severity.Info);
 
         try
         {
-            var run = await DataSync.RunAllActiveAccountsTrackedAsync("manual", CancellationToken.None);
-            var summary = run.Summary;
-
-            foreach (var failure in summary.AccountFailures)
-                Snackbar.Add($"账号 {failure.Phone} 同步失败：{failure.Error}", Severity.Warning);
-
-            Snackbar.Add($"同步完成：{summary.TotalChannelsSynced} 个频道，{summary.TotalGroupsSynced} 个群组。任务 #{run.TaskId} 已记录到任务中心", summary.AccountFailures.Count == 0 ? Severity.Success : Severity.Warning);
+            var taskId = await DataSync.StartAllActiveAccountsTrackedInBackgroundAsync("manual", CancellationToken.None);
+            Snackbar.Add($"已启动后台同步任务 #{taskId}，请到任务中心查看进度", Severity.Success);
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"同步失败：{ex.Message}", Severity.Error);
+            Snackbar.Add($"同步启动失败：{ex.Message}", Severity.Error);
         }
         finally
         {

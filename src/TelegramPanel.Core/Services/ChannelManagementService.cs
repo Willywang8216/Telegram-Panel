@@ -187,6 +187,43 @@ public class ChannelManagementService
         await _accountChannelRepository.DeleteForAccountExceptAsync(accountId, keepChannelIds);
     }
 
+    public async Task<IReadOnlyList<AccountChannel>> GetAccountChannelMembershipsAsync(int accountId, CancellationToken cancellationToken = default)
+    {
+        return await _accountChannelRepository.GetByAccountAsync(accountId, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<AccountChannel>> GetChannelAccountMembershipsAsync(int channelId, CancellationToken cancellationToken = default)
+    {
+        return await _accountChannelRepository.GetByChannelAsync(channelId, cancellationToken);
+    }
+
+    public async Task RemoveAccountChannelAsync(int channelId, int accountId)
+    {
+        var channel = await _channelRepository.GetByIdAsync(channelId);
+        if (channel == null)
+            return;
+
+        var hasRemainingRelations = channel.AccountChannels.Any(x => x.AccountId != accountId);
+        var creatorRemoved = channel.CreatorAccountId == accountId;
+
+        await _accountChannelRepository.DeleteAsync(accountId, channelId);
+
+        if (creatorRemoved)
+            channel.CreatorAccountId = null;
+
+        if (!hasRemainingRelations && channel.CreatorAccountId == null)
+        {
+            await _channelRepository.DeleteAsync(channel);
+            return;
+        }
+
+        if (!creatorRemoved)
+            return;
+
+        channel.SyncedAt = DateTime.UtcNow;
+        await _channelRepository.UpdateAsync(channel);
+    }
+
     /// <summary>
     /// 解析频道操作的执行账号：
     /// 优先使用 preferredAccountId，其次 CreatorAccountId，否则从关联表中挑选一个管理员账号。

@@ -12,14 +12,10 @@ public class GroupRepository : Repository<Group>, IGroupRepository
     {
     }
 
-    private IQueryable<Group> BuildForViewQuery(int accountId, int? categoryId, string? filterType, string? membershipRole, string? search)
+    private IQueryable<Group> BuildFilterQuery(int accountId, int? categoryId, string? filterType, string? membershipRole, string? search)
     {
         var query = _dbSet
             .AsNoTracking()
-            .Include(g => g.CreatorAccount)
-            .Include(g => g.Category)
-            .Include(g => g.AccountGroups)
-            .AsSplitQuery()
             .AsQueryable();
 
         query = query.Where(g => g.CreatorAccountId != null || g.AccountGroups.Any());
@@ -70,7 +66,25 @@ public class GroupRepository : Repository<Group>, IGroupRepository
                 || (g.Category != null && EF.Functions.Like(g.Category.Name, like)));
         }
 
-        return query.OrderByDescending(g => g.SyncedAt);
+        return query;
+    }
+
+    private IQueryable<Group> BuildPagedDetailQuery(IReadOnlyCollection<int> ids, int accountId)
+    {
+        IQueryable<Group> query = _dbSet
+            .AsNoTracking()
+            .Where(g => ids.Contains(g.Id))
+            .Include(g => g.CreatorAccount)
+            .Include(g => g.Category);
+
+        if (accountId > 0)
+        {
+            query = query
+                .Include(g => g.AccountGroups.Where(x => x.AccountId == accountId))
+                .AsSplitQuery();
+        }
+
+        return query;
     }
 
     public override async Task<Group?> GetByIdAsync(int id)
@@ -131,13 +145,34 @@ public class GroupRepository : Repository<Group>, IGroupRepository
         if (pageSize <= 0) pageSize = 20;
         if (pageSize > 500) pageSize = 500;
 
-        var query = BuildForViewQuery(accountId, categoryId, filterType, membershipRole, search);
-        var total = await query.CountAsync(cancellationToken);
-        var items = await query
+        var filteredQuery = BuildFilterQuery(accountId, categoryId, filterType, membershipRole, search);
+        var total = await filteredQuery.CountAsync(cancellationToken);
+
+        if (total == 0)
+            return (Array.Empty<Group>(), 0);
+
+        var pageIds = await filteredQuery
+            .OrderByDescending(g => g.SyncedAt)
+            .ThenByDescending(g => g.Id)
             .Skip(pageIndex * pageSize)
             .Take(pageSize)
+            .Select(g => g.Id)
             .ToListAsync(cancellationToken);
 
-        return (items, total);
+        if (pageIds.Count == 0)
+            return (Array.Empty<Group>(), total);
+
+        var orderMap = pageIds
+            .Select((id, index) => new { id, index })
+            .ToDictionary(x => x.id, x => x.index);
+
+        var items = await BuildPagedDetailQuery(pageIds, accountId)
+            .ToListAsync(cancellationToken);
+
+        var orderedItems = items
+            .OrderBy(g => orderMap[g.Id])
+            .ToList();
+
+        return (orderedItems, total);
     }
 }

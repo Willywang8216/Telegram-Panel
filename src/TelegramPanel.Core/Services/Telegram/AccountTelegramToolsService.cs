@@ -50,7 +50,12 @@ public class AccountTelegramToolsService
             var client = await GetOrCreateConnectedClientAsync(accountId, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
-            var users = await client.Users_GetUsers(InputUser.Self);
+            var users = await ExecuteTelegramRequestAsync(
+                accountId,
+                "拉取账号资料",
+                () => client.Users_GetUsers(InputUser.Self),
+                cancellationToken,
+                resetClientOnTimeout: true);
             cancellationToken.ThrowIfCancellationRequested();
             var self = users.OfType<User>().FirstOrDefault();
 
@@ -1409,10 +1414,22 @@ public class AccountTelegramToolsService
 
         try
         {
-            await client.ConnectAsync();
+            await ExecuteTelegramRequestAsync(
+                accountId,
+                "连接 Telegram",
+                () => client.ConnectAsync(),
+                cancellationToken,
+                resetClientOnTimeout: true);
             cancellationToken.ThrowIfCancellationRequested();
             if (client.User == null && (client.UserId != 0 || account.UserId != 0))
-                await client.LoginUserIfNeeded(reloginOnFailedResume: false);
+            {
+                await ExecuteTelegramRequestAsync(
+                    accountId,
+                    "恢复 Telegram 登录状态",
+                    () => client.LoginUserIfNeeded(reloginOnFailedResume: false),
+                    cancellationToken,
+                    resetClientOnTimeout: true);
+            }
         }
         catch (Exception ex)
         {
@@ -1431,6 +1448,70 @@ public class AccountTelegramToolsService
             throw new InvalidOperationException("账号未登录或 session 已失效，请重新登录生成新的 session");
 
         return client;
+    }
+
+    private TimeSpan GetTelegramRequestTimeout()
+    {
+        var seconds = int.TryParse(_configuration["Telegram:RequestTimeoutSeconds"], out var parsedSeconds)
+            ? parsedSeconds
+            : 90;
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, 15, 600));
+    }
+
+    private async Task ExecuteTelegramRequestAsync(
+        int accountId,
+        string operation,
+        Func<Task> action,
+        CancellationToken cancellationToken,
+        bool resetClientOnTimeout)
+    {
+        var timeout = GetTelegramRequestTimeout();
+
+        try
+        {
+            await action().WaitAsync(timeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning(
+                "Telegram request timed out after {TimeoutSeconds}s for account {AccountId}: {Operation}",
+                timeout.TotalSeconds,
+                accountId,
+                operation);
+
+            if (resetClientOnTimeout)
+                await _clientPool.RemoveClientAsync(accountId);
+
+            throw new TimeoutException($"Telegram 请求超时：{operation} 超过 {timeout.TotalSeconds:0} 秒，可能是 Session 失效、账号受限、网络异常或代理异常");
+        }
+    }
+
+    private async Task<T> ExecuteTelegramRequestAsync<T>(
+        int accountId,
+        string operation,
+        Func<Task<T>> action,
+        CancellationToken cancellationToken,
+        bool resetClientOnTimeout)
+    {
+        var timeout = GetTelegramRequestTimeout();
+
+        try
+        {
+            return await action().WaitAsync(timeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning(
+                "Telegram request timed out after {TimeoutSeconds}s for account {AccountId}: {Operation}",
+                timeout.TotalSeconds,
+                accountId,
+                operation);
+
+            if (resetClientOnTimeout)
+                await _clientPool.RemoveClientAsync(accountId);
+
+            throw new TimeoutException($"Telegram 请求超时：{operation} 超过 {timeout.TotalSeconds:0} 秒，可能是 Session 失效、账号受限、网络异常或代理异常");
+        }
     }
 
     private int ResolveApiId(Account account)
@@ -1492,7 +1573,12 @@ public class AccountTelegramToolsService
             UpdatesBase updates;
             try
             {
-                updates = await client.Channels_CreateChannel(title: title, about: about, broadcast: true);
+                updates = await ExecuteTelegramRequestAsync(
+                    accountId,
+                    "创建测试频道探测账号状态",
+                    () => client.Channels_CreateChannel(title: title, about: about, broadcast: true),
+                    cancellationToken,
+                    resetClientOnTimeout: true);
             }
             catch (RpcException ex) when (ex.Code == 420 && string.Equals(ex.Message, "FROZEN_METHOD_INVALID", StringComparison.OrdinalIgnoreCase))
             {
@@ -1509,7 +1595,12 @@ public class AccountTelegramToolsService
             {
                 // 立即删除，避免留下垃圾频道
                 var input = new InputChannel(channel.id, channel.access_hash);
-                await client.Channels_DeleteChannel(input);
+                await ExecuteTelegramRequestAsync(
+                    accountId,
+                    $"删除测试频道({channel.id})",
+                    () => client.Channels_DeleteChannel(input),
+                    cancellationToken,
+                    resetClientOnTimeout: false);
             }
             catch (Exception ex)
             {
@@ -1534,6 +1625,12 @@ public class AccountTelegramToolsService
     public static (string summary, string details) MapTelegramException(Exception ex)
     {
         var msg = ex.Message ?? string.Empty;
+
+        if (ex is TimeoutException
+            || msg.Contains("请求超时", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("timeout", StringComparison.OrdinalIgnoreCase))
+            return ("请求超时", msg);
 
         if (msg.Contains("EMAIL_HASH_EXPIRED", StringComparison.OrdinalIgnoreCase))
             return (

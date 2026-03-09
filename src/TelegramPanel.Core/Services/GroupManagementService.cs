@@ -130,6 +130,43 @@ public class GroupManagementService
         await _accountGroupRepository.DeleteForAccountExceptAsync(accountId, keepGroupIds);
     }
 
+    public async Task<IReadOnlyList<AccountGroup>> GetAccountGroupMembershipsAsync(int accountId, CancellationToken cancellationToken = default)
+    {
+        return await _accountGroupRepository.GetByAccountAsync(accountId, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<AccountGroup>> GetGroupAccountMembershipsAsync(int groupId, CancellationToken cancellationToken = default)
+    {
+        return await _accountGroupRepository.GetByGroupAsync(groupId, cancellationToken);
+    }
+
+    public async Task RemoveAccountGroupAsync(int groupId, int accountId)
+    {
+        var group = await _groupRepository.GetByIdAsync(groupId);
+        if (group == null)
+            return;
+
+        var hasRemainingRelations = group.AccountGroups.Any(x => x.AccountId != accountId);
+        var creatorRemoved = group.CreatorAccountId == accountId;
+
+        await _accountGroupRepository.DeleteAsync(accountId, groupId);
+
+        if (creatorRemoved)
+            group.CreatorAccountId = null;
+
+        if (!hasRemainingRelations && group.CreatorAccountId == null)
+        {
+            await _groupRepository.DeleteAsync(group);
+            return;
+        }
+
+        if (!creatorRemoved)
+            return;
+
+        group.SyncedAt = DateTime.UtcNow;
+        await _groupRepository.UpdateAsync(group);
+    }
+
     /// <summary>
     /// 解析群组操作的执行账号：
     /// 优先使用 preferredAccountId，其次 CreatorAccountId，否则从关联表中挑选一个管理员账号。

@@ -12,16 +12,13 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
     {
     }
 
-    private IQueryable<Channel> BuildForViewQuery(int accountId, int? groupId, string? filterType, string? membershipRole, string? search)
+    private IQueryable<Channel> BuildFilterQuery(int accountId, int? groupId, string? filterType, string? membershipRole, string? search)
     {
         var query = _dbSet
             .AsNoTracking()
-            .Include(c => c.CreatorAccount)
-            .Include(c => c.Group)
-            .Include(c => c.AccountChannels)
-            .AsSplitQuery()
             .AsQueryable();
 
+        query = query.Where(c => c.IsBroadcast);
         query = query.Where(c => c.CreatorAccountId != null || c.AccountChannels.Any());
 
         membershipRole = (membershipRole ?? "all").Trim().ToLowerInvariant();
@@ -70,7 +67,25 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
                 || (c.Group != null && EF.Functions.Like(c.Group.Name, like)));
         }
 
-        return query.OrderByDescending(c => c.SyncedAt);
+        return query;
+    }
+
+    private IQueryable<Channel> BuildPagedDetailQuery(IReadOnlyCollection<int> ids, int accountId)
+    {
+        IQueryable<Channel> query = _dbSet
+            .AsNoTracking()
+            .Where(c => ids.Contains(c.Id))
+            .Include(c => c.CreatorAccount)
+            .Include(c => c.Group);
+
+        if (accountId > 0)
+        {
+            query = query
+                .Include(c => c.AccountChannels.Where(x => x.AccountId == accountId))
+                .AsSplitQuery();
+        }
+
+        return query;
     }
 
     public override async Task<Channel?> GetByIdAsync(int id)
@@ -90,6 +105,7 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
             .Include(c => c.Group)
             .Include(c => c.AccountChannels)
             .AsSplitQuery()
+            .Where(c => c.IsBroadcast)
             .OrderByDescending(c => c.SyncedAt)
             .ToListAsync();
     }
@@ -111,7 +127,7 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
             .Include(c => c.Group)
             .Include(c => c.AccountChannels)
             .AsSplitQuery()
-            .Where(c => c.CreatorAccountId != null)
+            .Where(c => c.IsBroadcast && c.CreatorAccountId != null)
             .OrderByDescending(c => c.SyncedAt)
             .ToListAsync();
     }
@@ -123,7 +139,7 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
             .Include(c => c.Group)
             .Include(c => c.AccountChannels)
             .AsSplitQuery()
-            .Where(c => c.CreatorAccountId == accountId)
+            .Where(c => c.IsBroadcast && c.CreatorAccountId == accountId)
             .OrderByDescending(c => c.SyncedAt)
             .ToListAsync();
     }
@@ -138,7 +154,7 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
             .Include(c => c.Group)
             .Include(c => c.AccountChannels)
             .AsSplitQuery()
-            .Where(c => links.Any(x => x.ChannelId == c.Id))
+            .Where(c => c.IsBroadcast && links.Any(x => x.ChannelId == c.Id))
             .OrderByDescending(c => c.SyncedAt)
             .ToListAsync();
     }
@@ -150,7 +166,7 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
             .Include(c => c.Group)
             .Include(c => c.AccountChannels)
             .AsSplitQuery()
-            .Where(c => c.GroupId == groupId)
+            .Where(c => c.IsBroadcast && c.GroupId == groupId)
             .OrderByDescending(c => c.SyncedAt)
             .ToListAsync();
     }
@@ -181,13 +197,34 @@ public class ChannelRepository : Repository<Channel>, IChannelRepository
         if (pageSize <= 0) pageSize = 20;
         if (pageSize > 500) pageSize = 500;
 
-        var query = BuildForViewQuery(accountId, groupId, filterType, membershipRole, search);
-        var total = await query.CountAsync(cancellationToken);
-        var items = await query
+        var filteredQuery = BuildFilterQuery(accountId, groupId, filterType, membershipRole, search);
+        var total = await filteredQuery.CountAsync(cancellationToken);
+
+        if (total == 0)
+            return (Array.Empty<Channel>(), 0);
+
+        var pageIds = await filteredQuery
+            .OrderByDescending(c => c.SyncedAt)
+            .ThenByDescending(c => c.Id)
             .Skip(pageIndex * pageSize)
             .Take(pageSize)
+            .Select(c => c.Id)
             .ToListAsync(cancellationToken);
 
-        return (items, total);
+        if (pageIds.Count == 0)
+            return (Array.Empty<Channel>(), total);
+
+        var orderMap = pageIds
+            .Select((id, index) => new { id, index })
+            .ToDictionary(x => x.id, x => x.index);
+
+        var items = await BuildPagedDetailQuery(pageIds, accountId)
+            .ToListAsync(cancellationToken);
+
+        var orderedItems = items
+            .OrderBy(c => orderMap[c.Id])
+            .ToList();
+
+        return (orderedItems, total);
     }
 }

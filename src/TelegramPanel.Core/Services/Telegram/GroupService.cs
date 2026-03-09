@@ -36,15 +36,91 @@ public class GroupService : IGroupService
         return groups.Where(x => x.IsCreator).ToList();
     }
 
-    public async Task<List<GroupInfo>> GetVisibleGroupsAsync(int accountId)
+    public async Task<GroupInfo> CreateGroupAsync(int accountId, string title, string about, bool isPublic = false, string? username = null)
     {
         var client = await GetOrCreateConnectedClientAsync(accountId);
 
+        _logger.LogInformation("Creating group '{Title}' for account {AccountId}", title, accountId);
+
+        if (isPublic)
+        {
+            username = username?.Trim().TrimStart('@');
+            if (string.IsNullOrWhiteSpace(username))
+                throw new InvalidOperationException("公开群组需要设置用户名");
+        }
+
+        UpdatesBase updates;
+        try
+        {
+            updates = await client.Channels_CreateChannel(
+                title: title,
+                about: about,
+                broadcast: false,
+                megagroup: true
+            );
+        }
+        catch (RpcException ex) when (ex.Code == 420 && string.Equals(ex.Message, "FROZEN_METHOD_INVALID", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Telegram 返回 FROZEN_METHOD_INVALID：当前 ApiId/ApiHash 或账号被 Telegram 限制调用创建群组接口。" +
+                "建议：在【系统设置】更换全局 ApiId/ApiHash（推荐使用你自己在 my.telegram.org 申请的），" +
+                "并重新导入/重新登录生成 session 后再试。",
+                ex);
+        }
+
+        var group = updates.Chats.Values.OfType<Channel>().FirstOrDefault(c => !c.IsChannel)
+            ?? throw new InvalidOperationException("群组创建失败");
+
+        if (isPublic && !string.IsNullOrWhiteSpace(username))
+        {
+            var available = await client.Channels_CheckUsername(group, username);
+            if (!available)
+                throw new InvalidOperationException($"用户名 '{username}' 不可用");
+
+            try
+            {
+                await client.Channels_UpdateUsername(group, username);
+            }
+            catch (RpcException ex) when (ex.Message.Contains("USERNAME_NOT_MODIFIED", StringComparison.OrdinalIgnoreCase))
+            {
+                // 视为成功
+            }
+        }
+
+        return new GroupInfo
+        {
+            TelegramId = group.id,
+            AccessHash = group.access_hash,
+            Title = group.title,
+            Username = isPublic ? username : group.MainUsername,
+            MemberCount = 0,
+            About = about,
+            CreatorAccountId = accountId,
+            IsCreator = true,
+            IsAdmin = true,
+            CreatedAt = group.date,
+            SyncedAt = DateTime.UtcNow
+        };
+    }
+
+    public async Task<List<GroupInfo>> GetVisibleGroupsAsync(int accountId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var client = await GetOrCreateConnectedClientAsync(accountId, cancellationToken);
+
         var groups = new List<GroupInfo>();
-        var dialogs = await client.Messages_GetAllDialogs();
+        var dialogs = await ExecuteTelegramRequestAsync(
+            accountId,
+            "拉取频道/群组对话列表",
+            () => client.Messages_GetAllDialogs(),
+            cancellationToken,
+            resetClientOnTimeout: true);
 
         foreach (var (_, chat) in dialogs.chats)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             // 基础群组（Chat 类型，非 Channel）
             if (chat is Chat basicChat && basicChat.IsActive)
             {
@@ -56,7 +132,12 @@ public class GroupService : IGroupService
 
                 try
                 {
-                    var fullChat = await client.Messages_GetFullChat(basicChat.id);
+                    var fullChat = await ExecuteTelegramRequestAsync(
+                        accountId,
+                        $"拉取基础群详情({basicChat.id})",
+                        () => client.Messages_GetFullChat(basicChat.id),
+                        cancellationToken,
+                        resetClientOnTimeout: false);
                     if (fullChat.full_chat is ChatFull cf)
                     {
                         about = ReadString(cf, about, "about", "About");
@@ -117,7 +198,12 @@ public class GroupService : IGroupService
                 string? about = null;
                 try
                 {
-                    var fullChannel = await client.Channels_GetFullChannel(channel);
+                    var fullChannel = await ExecuteTelegramRequestAsync(
+                        accountId,
+                        $"拉取超级群详情({channel.id})",
+                        () => client.Channels_GetFullChannel(channel),
+                        cancellationToken,
+                        resetClientOnTimeout: false);
                     memberCount = fullChannel.full_chat.ParticipantsCount;
                     about = (fullChannel.full_chat as ChannelFull)?.about;
                 }
@@ -330,6 +416,84 @@ public class GroupService : IGroupService
         return groups.FirstOrDefault(g => g.TelegramId == groupId);
     }
 
+    public async Task<bool> LeaveGroupAsync(int accountId, long groupId)
+    {
+        try
+        {
+            var client = await GetOrCreateConnectedClientAsync(accountId);
+            var dialogs = await ExecuteTelegramRequestAsync(
+                accountId,
+                "拉取频道/群组对话列表",
+                () => client.Messages_GetAllDialogs(),
+                CancellationToken.None,
+                resetClientOnTimeout: true);
+
+            var normalizedId = groupId > 0 ? groupId : Math.Abs(groupId);
+            var chat = dialogs.chats.Values.FirstOrDefault(x =>
+                x switch
+                {
+                    Chat basicChat => basicChat.id == normalizedId,
+                    Channel channel => !channel.IsChannel && channel.id == normalizedId,
+                    _ => false
+                });
+
+            if (chat == null)
+                throw new InvalidOperationException($"群组 {groupId} not found");
+
+            await ExecuteTelegramRequestAsync(
+                accountId,
+                $"退出群组({normalizedId})",
+                () => client.LeaveChat(chat.ToInputPeer()),
+                CancellationToken.None,
+                resetClientOnTimeout: false);
+
+            return true;
+        }
+        catch (RpcException ex) when (ex.Code == 400 && string.Equals(ex.Message, "USER_NOT_PARTICIPANT", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    public async Task<bool> DisbandGroupAsync(int accountId, long groupId)
+    {
+        var client = await GetOrCreateConnectedClientAsync(accountId);
+        var dialogs = await ExecuteTelegramRequestAsync(
+            accountId,
+            "拉取频道/群组对话列表",
+            () => client.Messages_GetAllDialogs(),
+            CancellationToken.None,
+            resetClientOnTimeout: true);
+
+        var normalizedId = groupId > 0 ? groupId : Math.Abs(groupId);
+        var chat = dialogs.chats.Values.FirstOrDefault(x =>
+            x switch
+            {
+                Chat basicChat => basicChat.id == normalizedId,
+                Channel channel => !channel.IsChannel && channel.id == normalizedId,
+                _ => false
+            });
+
+        if (chat == null)
+            throw new InvalidOperationException($"群组 {groupId} not found");
+
+        if (chat is Chat)
+            throw new InvalidOperationException("基础群暂不支持一键解散，请在 Telegram 客户端手动操作或先升级为超级群");
+
+        if (chat is not Channel megaGroup)
+            throw new InvalidOperationException("仅支持解散超级群");
+
+        var input = new InputChannel(megaGroup.id, megaGroup.access_hash);
+        await ExecuteTelegramRequestAsync(
+            accountId,
+            $"解散群组({normalizedId})",
+            () => client.Channels_DeleteChannel(input),
+            CancellationToken.None,
+            resetClientOnTimeout: false);
+
+        return true;
+    }
+
     public async Task<string> ExportJoinLinkAsync(int accountId, long groupId)
     {
         var client = await GetOrCreateConnectedClientAsync(accountId);
@@ -468,8 +632,10 @@ public class GroupService : IGroupService
         throw new InvalidOperationException($"群组 {groupId} not found");
     }
 
-    private async Task<WTelegram.Client> GetOrCreateConnectedClientAsync(int accountId)
+    private async Task<WTelegram.Client> GetOrCreateConnectedClientAsync(int accountId, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         var existing = _clientPool.GetClient(accountId);
         if (existing?.User != null)
             return existing;
@@ -509,9 +675,22 @@ public class GroupService : IGroupService
 
         try
         {
-            await client.ConnectAsync();
+            await ExecuteTelegramRequestAsync(
+                accountId,
+                "连接 Telegram",
+                () => client.ConnectAsync(),
+                cancellationToken,
+                resetClientOnTimeout: true);
+
             if (client.User == null && (client.UserId != 0 || account.UserId != 0))
-                await client.LoginUserIfNeeded(reloginOnFailedResume: false);
+            {
+                await ExecuteTelegramRequestAsync(
+                    accountId,
+                    "恢复 Telegram 登录状态",
+                    () => client.LoginUserIfNeeded(reloginOnFailedResume: false),
+                    cancellationToken,
+                    resetClientOnTimeout: true);
+            }
         }
         catch (Exception ex)
         {
@@ -530,6 +709,70 @@ public class GroupService : IGroupService
             throw new InvalidOperationException("账号未登录或 session 已失效，请重新登录生成新的 session");
 
         return client;
+    }
+
+    private TimeSpan GetTelegramRequestTimeout()
+    {
+        var seconds = int.TryParse(_configuration["Telegram:RequestTimeoutSeconds"], out var parsedSeconds)
+            ? parsedSeconds
+            : 90;
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, 15, 600));
+    }
+
+    private async Task ExecuteTelegramRequestAsync(
+        int accountId,
+        string operation,
+        Func<Task> action,
+        CancellationToken cancellationToken,
+        bool resetClientOnTimeout)
+    {
+        var timeout = GetTelegramRequestTimeout();
+
+        try
+        {
+            await action().WaitAsync(timeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning(
+                "Telegram request timed out after {TimeoutSeconds}s for account {AccountId}: {Operation}",
+                timeout.TotalSeconds,
+                accountId,
+                operation);
+
+            if (resetClientOnTimeout)
+                await _clientPool.RemoveClientAsync(accountId);
+
+            throw new TimeoutException($"Telegram 请求超时：{operation} 超过 {timeout.TotalSeconds:0} 秒，可能是 Session 失效、账号受限、网络异常或代理异常");
+        }
+    }
+
+    private async Task<T> ExecuteTelegramRequestAsync<T>(
+        int accountId,
+        string operation,
+        Func<Task<T>> action,
+        CancellationToken cancellationToken,
+        bool resetClientOnTimeout)
+    {
+        var timeout = GetTelegramRequestTimeout();
+
+        try
+        {
+            return await action().WaitAsync(timeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning(
+                "Telegram request timed out after {TimeoutSeconds}s for account {AccountId}: {Operation}",
+                timeout.TotalSeconds,
+                accountId,
+                operation);
+
+            if (resetClientOnTimeout)
+                await _clientPool.RemoveClientAsync(accountId);
+
+            throw new TimeoutException($"Telegram 请求超时：{operation} 超过 {timeout.TotalSeconds:0} 秒，可能是 Session 失效、账号受限、网络异常或代理异常");
+        }
     }
 
     private int ResolveApiId(TelegramPanel.Data.Entities.Account account)

@@ -205,13 +205,17 @@ public class AccountRepository : Repository<Account>, IAccountRepository
 
         var linkedChannelPairs = await _context.Set<AccountChannel>()
             .AsNoTracking()
+            .Join(
+                _context.Set<Channel>().AsNoTracking().Where(x => x.IsBroadcast),
+                link => link.ChannelId,
+                channel => channel.Id,
+                (link, channel) => new { link.AccountId, link.ChannelId })
             .Where(x => accountIds.Contains(x.AccountId))
-            .Select(x => new { x.AccountId, x.ChannelId })
             .ToListAsync(cancellationToken);
 
         var createdChannelPairs = await _context.Set<Channel>()
             .AsNoTracking()
-            .Where(x => x.CreatorAccountId.HasValue && accountIds.Contains(x.CreatorAccountId.Value))
+            .Where(x => x.IsBroadcast && x.CreatorAccountId.HasValue && accountIds.Contains(x.CreatorAccountId.Value))
             .Select(x => new { AccountId = x.CreatorAccountId!.Value, ChannelId = x.Id })
             .ToListAsync(cancellationToken);
 

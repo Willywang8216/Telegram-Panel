@@ -75,6 +75,9 @@ public class AppDbContext : DbContext
 
             entity.HasIndex(e => e.TelegramId).IsUnique();
             entity.HasIndex(e => e.Username);
+            entity.HasIndex(e => e.CreatorAccountId);
+            entity.HasIndex(e => e.GroupId);
+            entity.HasIndex(e => e.SyncedAt);
 
             entity.HasOne(e => e.CreatorAccount)
                 .WithMany(a => a.Channels)
@@ -93,6 +96,7 @@ public class AppDbContext : DbContext
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => new { e.AccountId, e.ChannelId }).IsUnique();
             entity.HasIndex(e => e.ChannelId);
+            entity.HasIndex(e => new { e.ChannelId, e.IsCreator, e.IsAdmin });
 
             entity.HasOne(e => e.Account)
                 .WithMany(a => a.AccountChannels)
@@ -126,6 +130,8 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => e.TelegramId).IsUnique();
             entity.HasIndex(e => e.Username);
             entity.HasIndex(e => e.CategoryId);
+            entity.HasIndex(e => e.CreatorAccountId);
+            entity.HasIndex(e => e.SyncedAt);
 
             entity.HasOne(e => e.CreatorAccount)
                 .WithMany(a => a.Groups)
@@ -144,6 +150,7 @@ public class AppDbContext : DbContext
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => new { e.AccountId, e.GroupId }).IsUnique();
             entity.HasIndex(e => e.GroupId);
+            entity.HasIndex(e => new { e.GroupId, e.IsCreator, e.IsAdmin });
 
             entity.HasOne(e => e.Account)
                 .WithMany(a => a.AccountGroups)

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using TelegramPanel.Core.BatchTasks;
 using TelegramPanel.Core.Interfaces;
@@ -23,6 +24,7 @@ public class DataSyncService
     private readonly IGroupService _groupService;
     private readonly AccountTelegramToolsService _telegramTools;
     private readonly BatchTaskManagementService _taskManagement;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
     private readonly ILogger<DataSyncService> _logger;
 
@@ -34,6 +36,7 @@ public class DataSyncService
         IGroupService groupService,
         AccountTelegramToolsService telegramTools,
         BatchTaskManagementService taskManagement,
+        IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
         ILogger<DataSyncService> logger)
     {
@@ -44,28 +47,78 @@ public class DataSyncService
         _groupService = groupService;
         _telegramTools = telegramTools;
         _taskManagement = taskManagement;
+        _scopeFactory = scopeFactory;
         _configuration = configuration;
         _logger = logger;
     }
 
     public async Task<TrackedSyncResult> RunAllActiveAccountsTrackedAsync(string trigger, CancellationToken cancellationToken)
     {
-        if (!await SyncGate.WaitAsync(0, cancellationToken))
-            throw new InvalidOperationException("账号数据同步已在运行，请到任务中心查看当前进度");
+        var task = await CreateTrackedTaskAsync(trigger, cancellationToken);
+        return await ExecuteTrackedSyncAsync(task.Id, trigger, cancellationToken);
+    }
 
-        BatchTask? task = null;
+    public async Task<int> StartAllActiveAccountsTrackedInBackgroundAsync(string trigger, CancellationToken cancellationToken = default)
+    {
+        var task = await CreateTrackedTaskAsync(trigger, cancellationToken);
+        var taskId = task.Id;
+        var scopeFactory = _scopeFactory;
+        var logger = _logger;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var dataSync = scope.ServiceProvider.GetRequiredService<DataSyncService>();
+                await dataSync.ExecuteTrackedSyncAsync(taskId, trigger, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Manual account sync background execution failed unexpectedly for task {TaskId}", taskId);
+            }
+        }, CancellationToken.None);
+
+        return taskId;
+    }
+
+    private async Task<BatchTask> CreateTrackedTaskAsync(string trigger, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var accounts = await GetDistinctActiveAccountsAsync();
+
+        return await _taskManagement.CreateTaskAsync(new BatchTask
+        {
+            TaskType = BatchTaskTypes.AccountAutoSync,
+            Total = accounts.Count,
+            Config = BuildSyncTaskConfig(
+                trigger: trigger,
+                totalAccounts: accounts.Count,
+                processedAccounts: 0,
+                failedAccounts: 0,
+                totalChannelsSynced: 0,
+                totalGroupsSynced: 0,
+                failures: Array.Empty<SyncFailureItem>(),
+                error: null)
+        });
+    }
+
+    private async Task<TrackedSyncResult> ExecuteTrackedSyncAsync(int taskId, string trigger, CancellationToken cancellationToken)
+    {
+        var gateEntered = false;
+
         try
         {
-            var accounts = (await _accountManagement.GetActiveAccountsAsync())
-                .GroupBy(x => x.Id)
-                .Select(x => x.First())
-                .ToList();
+            gateEntered = await SyncGate.WaitAsync(0, cancellationToken);
+            if (!gateEntered)
+                throw new InvalidOperationException("账号数据同步已在运行，请到任务中心查看当前进度");
 
-            task = await _taskManagement.CreateTaskAsync(new BatchTask
-            {
-                TaskType = BatchTaskTypes.AccountAutoSync,
-                Total = accounts.Count,
-                Config = BuildSyncTaskConfig(
+            var accounts = await GetDistinctActiveAccountsAsync();
+            await _taskManagement.UpdateTaskDraftAsync(
+                taskId,
+                accounts.Count,
+                BuildSyncTaskConfig(
                     trigger: trigger,
                     totalAccounts: accounts.Count,
                     processedAccounts: 0,
@@ -73,19 +126,18 @@ public class DataSyncService
                     totalChannelsSynced: 0,
                     totalGroupsSynced: 0,
                     failures: Array.Empty<SyncFailureItem>(),
-                    error: null)
-            });
+                    error: null));
 
-            await _taskManagement.StartTaskAsync(task.Id);
+            await _taskManagement.StartTaskAsync(taskId);
 
             var summary = await SyncAccountsAsync(
                 accounts,
                 cancellationToken,
-                progressCallback: progress => _taskManagement.UpdateTaskProgressAsync(task.Id, progress.ProcessedAccounts, progress.FailedAccounts));
+                progressCallback: progress => _taskManagement.UpdateTaskProgressAsync(taskId, progress.ProcessedAccounts, progress.FailedAccounts));
 
-            await _taskManagement.UpdateTaskProgressAsync(task.Id, summary.ProcessedAccounts, summary.FailedAccountsCount);
+            await _taskManagement.UpdateTaskProgressAsync(taskId, summary.ProcessedAccounts, summary.FailedAccountsCount);
             await _taskManagement.UpdateTaskConfigAsync(
-                task.Id,
+                taskId,
                 BuildSyncTaskConfig(
                     trigger: trigger,
                     totalAccounts: summary.TotalAccounts,
@@ -95,56 +147,57 @@ public class DataSyncService
                     totalGroupsSynced: summary.TotalGroupsSynced,
                     failures: summary.AccountFailures.Select(ToFailureItem).ToList(),
                     error: null));
-            await _taskManagement.CompleteTaskAsync(task.Id, success: true);
+            await _taskManagement.CompleteTaskAsync(taskId, success: true);
 
-            return new TrackedSyncResult(task.Id, summary);
+            return new TrackedSyncResult(taskId, summary);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            if (task != null)
-            {
-                var snapshot = await _taskManagement.GetTaskAsync(task.Id);
-                await _taskManagement.UpdateTaskConfigAsync(
-                    task.Id,
-                    BuildSyncTaskConfig(
-                        trigger: trigger,
-                        totalAccounts: snapshot?.Total ?? 0,
-                        processedAccounts: snapshot?.Completed ?? 0,
-                        failedAccounts: snapshot?.Failed ?? 0,
-                        totalChannelsSynced: 0,
-                        totalGroupsSynced: 0,
-                        failures: Array.Empty<SyncFailureItem>(),
-                        error: "已取消"));
-                await _taskManagement.CompleteTaskAsync(task.Id, success: false);
-            }
-
+            var snapshot = await _taskManagement.GetTaskAsync(taskId);
+            await _taskManagement.UpdateTaskConfigAsync(
+                taskId,
+                BuildSyncTaskConfig(
+                    trigger: trigger,
+                    totalAccounts: snapshot?.Total ?? 0,
+                    processedAccounts: snapshot?.Completed ?? 0,
+                    failedAccounts: snapshot?.Failed ?? 0,
+                    totalChannelsSynced: 0,
+                    totalGroupsSynced: 0,
+                    failures: Array.Empty<SyncFailureItem>(),
+                    error: "已取消"));
+            await _taskManagement.CompleteTaskAsync(taskId, success: false);
             throw;
         }
         catch (Exception ex)
         {
-            if (task != null)
-            {
-                var snapshot = await _taskManagement.GetTaskAsync(task.Id);
-                await _taskManagement.UpdateTaskConfigAsync(
-                    task.Id,
-                    BuildSyncTaskConfig(
-                        trigger: trigger,
-                        totalAccounts: snapshot?.Total ?? 0,
-                        processedAccounts: snapshot?.Completed ?? 0,
-                        failedAccounts: snapshot?.Failed ?? 0,
-                        totalChannelsSynced: 0,
-                        totalGroupsSynced: 0,
-                        failures: Array.Empty<SyncFailureItem>(),
-                        error: ex.Message));
-                await _taskManagement.CompleteTaskAsync(task.Id, success: false);
-            }
-
+            var snapshot = await _taskManagement.GetTaskAsync(taskId);
+            await _taskManagement.UpdateTaskConfigAsync(
+                taskId,
+                BuildSyncTaskConfig(
+                    trigger: trigger,
+                    totalAccounts: snapshot?.Total ?? 0,
+                    processedAccounts: snapshot?.Completed ?? 0,
+                    failedAccounts: snapshot?.Failed ?? 0,
+                    totalChannelsSynced: 0,
+                    totalGroupsSynced: 0,
+                    failures: Array.Empty<SyncFailureItem>(),
+                    error: ex.Message));
+            await _taskManagement.CompleteTaskAsync(taskId, success: false);
             throw;
         }
         finally
         {
-            SyncGate.Release();
+            if (gateEntered)
+                SyncGate.Release();
         }
+    }
+
+    private async Task<List<Account>> GetDistinctActiveAccountsAsync()
+    {
+        return (await _accountManagement.GetActiveAccountsAsync())
+            .GroupBy(x => x.Id)
+            .Select(x => x.First())
+            .ToList();
     }
 
     public async Task<SyncSummary> SyncAllActiveAccountsAsync(
@@ -191,10 +244,17 @@ public class DataSyncService
             var accountFailed = false;
             cancellationToken.ThrowIfCancellationRequested();
 
+            _logger.LogInformation(
+                "Syncing account {Index}/{Total}: {AccountId} {Phone}",
+                index + 1,
+                accountList.Count,
+                account.Id,
+                account.Phone);
+
             try
             {
                 // 同步频道：拉取账号当前可见的全部频道，并记录该账号在频道中的角色关系。
-                var channelInfos = await _channelService.GetVisibleChannelsAsync(account.Id);
+                var channelInfos = await _channelService.GetVisibleChannelsAsync(account.Id, cancellationToken);
                 var keepChannelIds = new List<int>(capacity: channelInfos.Count);
 
                 foreach (var channelInfo in channelInfos)
@@ -230,7 +290,7 @@ public class DataSyncService
                 await _channelManagement.DeleteStaleAccountChannelsAsync(account.Id, keepChannelIds);
 
                 // 同步群组：拉取账号当前可见的全部群组，并记录该账号在群组中的角色关系。
-                var groupInfos = await _groupService.GetVisibleGroupsAsync(account.Id);
+                var groupInfos = await _groupService.GetVisibleGroupsAsync(account.Id, cancellationToken);
                 var keepGroupIds = new List<int>(capacity: groupInfos.Count);
 
                 foreach (var groupInfo in groupInfos)
