@@ -1274,7 +1274,10 @@ public class AccountTelegramToolsService
 
         var mentionsAccount = ContainsUsernameMention(update.Message.message, currentUsername);
         var replyToSent = update.ReplyToMessageId == sentMessageId;
-        return mentionsAccount || replyToSent;
+        if (!mentionsAccount && !replyToSent)
+            return false;
+
+        return LooksLikeVerificationChallenge(update);
     }
 
     private async Task<TelegramVerificationMessageCandidate?> BuildVerificationCandidateAsync(
@@ -1323,6 +1326,78 @@ public class AccountTelegramToolsService
             return false;
 
         return messageText.Contains($"@{username}", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeVerificationChallenge(TelegramAccountMessageUpdate update)
+    {
+        if (update.Buttons.Count > 0 || update.HasVisualMedia)
+            return true;
+
+        var text = update.Text;
+        if (text.Length == 0)
+            return false;
+
+        if (ContainsAny(text, "垃圾广告", "广告", "不予处理", "已删除", "违规", "封禁")
+            && !ContainsAny(text, "验证", "验证码", "校验", "captcha"))
+        {
+            return false;
+        }
+
+        if (ContainsAny(text,
+                "验证",
+                "验证码",
+                "校验",
+                "请选择",
+                "点击",
+                "按钮",
+                "完成验证",
+                "请回复",
+                "答案",
+                "算式",
+                "等于多少",
+                "reply",
+                "captcha"))
+        {
+            return true;
+        }
+
+        return LooksLikeMathChallenge(text);
+    }
+
+    private static bool LooksLikeMathChallenge(string text)
+    {
+        var digitCount = 0;
+        foreach (var ch in text)
+        {
+            if (char.IsDigit(ch))
+                digitCount++;
+        }
+
+        if (digitCount < 2)
+            return false;
+
+        return text.IndexOf('+') >= 0
+               || text.IndexOf('-') >= 0
+               || text.IndexOf('*') >= 0
+               || text.IndexOf('/') >= 0
+               || text.Contains("×", StringComparison.Ordinal)
+               || text.Contains("÷", StringComparison.Ordinal)
+               || text.Contains("＝", StringComparison.Ordinal)
+               || text.IndexOf('=') >= 0;
+    }
+
+    private static bool ContainsAny(string text, params string[] keywords)
+    {
+        foreach (var keyword in keywords)
+        {
+            if (!string.IsNullOrWhiteSpace(keyword)
+                && text.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static List<TelegramInlineButtonOption> ExtractInlineButtons(Message message)

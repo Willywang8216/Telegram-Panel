@@ -44,11 +44,16 @@ public sealed class TelegramPanelAiService : ITelegramPanelAiService
         var model = settings.ResolveModel(request.Model)!;
         var buttons = request.Buttons ?? Array.Empty<TelegramPanelAiButtonOption>();
         var buttonLines = buttons.Select(x => $"{x.Index}. {x.Text}").ToArray();
-        var systemPrompt =
-            "你是 Telegram 验证助手。请根据消息文本、按钮列表和可选图片，输出唯一 JSON 决策。" +
-            "只允许输出 JSON，不要输出 Markdown，不要解释。JSON 格式：" +
-            "{\"mode\":\"click_button\"|\"reply_text\",\"button_index\":0,\"reply_text\":null,\"reason\":\"30字内\"}。" +
-            "如果需要点击按钮，mode=click_button，button_index 必须是 0 基索引；如果更适合直接回答，mode=reply_text，reply_text 必须填写最终回复内容。";
+        var hasButtons = buttonLines.Length > 0;
+        var systemPrompt = hasButtons
+            ? "你是 Telegram 验证助手。当前消息存在可点击按钮。请根据消息文本、按钮列表和可选图片，只输出唯一 JSON 决策。" +
+              "只允许输出 JSON，不要输出 Markdown，不要解释。JSON 格式：" +
+              "{\"mode\":\"click_button\",\"button_index\":0,\"reply_text\":null,\"reason\":\"30字内\"}。" +
+              "注意：当前存在按钮时，不允许返回 reply_text，必须返回 click_button，button_index 必须是 0 基索引。"
+            : "你是 Telegram 验证助手。请根据消息文本、按钮列表和可选图片，输出唯一 JSON 决策。" +
+              "只允许输出 JSON，不要输出 Markdown，不要解释。JSON 格式：" +
+              "{\"mode\":\"click_button\"|\"reply_text\",\"button_index\":0,\"reply_text\":null,\"reason\":\"30字内\"}。" +
+              "如果需要点击按钮，mode=click_button，button_index 必须是 0 基索引；如果更适合直接回答，mode=reply_text，reply_text 必须填写最终回复内容。";
 
         var text = new StringBuilder();
         text.AppendLine("请处理下面这条 Telegram 验证消息。");

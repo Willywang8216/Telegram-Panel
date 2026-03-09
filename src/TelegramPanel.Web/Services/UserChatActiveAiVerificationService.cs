@@ -64,17 +64,23 @@ public sealed class UserChatActiveAiVerificationService
                 if (replyText.Length == 0)
                     return (false, "AI 返回了 reply_text，但内容为空", null);
 
-                var reply = await _accountTools.SendMessageToResolvedChatAsync(
-                    account.Id,
-                    target,
-                    replyText,
-                    replyToMessageId: candidate.MessageId,
-                    cancellationToken: cancellationToken);
+                var mappedButton = TryMatchButtonByReplyText(candidate.Buttons, replyText);
+                if (mappedButton != null)
+                {
+                    var mappedClick = await _accountTools.ClickInlineButtonAsync(
+                        account.Id,
+                        target,
+                        candidate.MessageId,
+                        mappedButton.CallbackData,
+                        cancellationToken);
 
-                if (!reply.Success)
-                    return (false, reply.Error, null);
+                    if (!mappedClick.Success)
+                        return (false, mappedClick.Error, null);
 
-                return (true, null, $"AI 文本回复：{replyText}");
+                    return (true, null, $"AI 文本映射按钮：{mappedButton.Text}");
+                }
+
+                return (false, $"验证码消息存在按钮，但 AI 返回了文本：{replyText}", null);
             }
 
             var button = candidate.Buttons.FirstOrDefault(x => x.Index == decision.ButtonIndex);
@@ -133,5 +139,41 @@ public sealed class UserChatActiveAiVerificationService
             candidate.MessageId);
 
         return (true, null, $"AI 文本回复：{replyContent}");
+    }
+
+    private static TelegramInlineButtonOption? TryMatchButtonByReplyText(
+        IReadOnlyList<TelegramInlineButtonOption> buttons,
+        string replyText)
+    {
+        var normalizedReply = NormalizeButtonText(replyText);
+        if (normalizedReply.Length == 0)
+            return null;
+
+        foreach (var button in buttons)
+        {
+            if (NormalizeButtonText(button.Text) == normalizedReply)
+                return button;
+        }
+
+        foreach (var button in buttons)
+        {
+            var normalizedButton = NormalizeButtonText(button.Text);
+            if (normalizedButton.Contains(normalizedReply, StringComparison.OrdinalIgnoreCase)
+                || normalizedReply.Contains(normalizedButton, StringComparison.OrdinalIgnoreCase))
+            {
+                return button;
+            }
+        }
+
+        return null;
+    }
+
+    private static string NormalizeButtonText(string? value)
+    {
+        return (value ?? string.Empty)
+            .Trim()
+            .Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Replace("\r", string.Empty, StringComparison.Ordinal)
+            .Replace("\n", string.Empty, StringComparison.Ordinal);
     }
 }

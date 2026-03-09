@@ -474,13 +474,6 @@
 
     private static string GetDisplayStatus(BatchTask task)
     {
-        if (task.Status == "pending"
-            && IsUserChatActiveTask(task.TaskType)
-            && task.Total == 0)
-        {
-            return "running";
-        }
-
         if (task.Status == "failed" && task.CompletedAt.HasValue && task.Total > 0 && task.Completed >= task.Total)
             return "completed";
 
@@ -565,7 +558,7 @@
     private bool CanPauseTask(BatchTask task)
     {
         var capabilities = GetTaskDefinition(task)?.Definition.TaskCenter;
-        return capabilities?.CanPause == true && HasStatus(task, "running");
+        return capabilities?.CanPause == true && task.Status is "running" or "pending";
     }
 
     private bool CanResumeTask(BatchTask task)
